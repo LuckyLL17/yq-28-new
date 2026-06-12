@@ -1,287 +1,492 @@
-import { create } from 'zustand';
-import * as CANNON from 'cannon-es';
+import { useRef, useState, useCallback, useEffect } from 'react';
+import { useFrame, useThree, ThreeEvent } from '@react-three/fiber';
+import * as THREE from 'three';
+import { useGameStore, materialProperties, generateId, BlockData } from '@/store/gameStore';
 
-export type WeaponType = 'wreckingBall' | 'steelBall' | 'explosive';
-export type MaterialType = 'wood' | 'glass' | 'concrete';
-export type GameMode = 'destroy' | 'build';
-export type BuildTool = 'place' | 'move' | 'rotate' | 'delete';
+const GRID_SIZE = 1;
+const GRID_HALF = 20;
+const BLOCK_HEIGHT = 1;
+const ROTATION_STEP = Math.PI / 2;
 
-export interface BlockData {
-  id: string;
-  position: [number, number, number];
-  size: [number, number, number];
-  material: MaterialType;
-  health: number;
-  maxHealth: number;
-  rotation?: [number, number, number];
-}
+function BuildGrid() {
+  const linesRef = useRef<THREE.Group>(null);
 
-export interface ParticleData {
-  id: string;
-  position: [number, number, number];
-  velocity: [number, number, number];
-  color: string;
-  size: number;
-  life: number;
-  maxLife: number;
-}
-
-export interface ExplosionData {
-  id: string;
-  position: [number, number, number];
-  radius: number;
-  life: number;
-  maxLife: number;
-}
-
-export type BuildAction =
-  | { type: 'add'; block: BlockData }
-  | { type: 'remove'; block: BlockData }
-  | { type: 'move'; blockId: string; fromPosition: [number, number, number]; toPosition: [number, number, number] }
-  | { type: 'rotate'; blockId: string; fromRotation: [number, number, number]; toRotation: [number, number, number] };
-
-interface GameState {
-  weapon: WeaponType;
-  setWeapon: (weapon: WeaponType) => void;
-  blocks: Map<string, BlockData>;
-  addBlock: (block: BlockData) => void;
-  addBlocks: (blocks: BlockData[]) => void;
-  removeBlock: (id: string) => void;
-  damageBlock: (id: string, damage: number) => boolean;
-  updateBlockPosition: (id: string, position: [number, number, number]) => void;
-  updateBlockRotation: (id: string, rotation: [number, number, number]) => void;
-  particles: Map<string, ParticleData>;
-  addParticle: (particle: ParticleData) => void;
-  removeParticle: (id: string) => void;
-  updateParticle: (id: string, data: Partial<ParticleData>) => void;
-  explosions: Map<string, ExplosionData>;
-  addExplosion: (explosion: ExplosionData) => void;
-  removeExplosion: (id: string) => void;
-  updateExplosion: (id: string, data: Partial<ExplosionData>) => void;
-  wreckingBallActive: boolean;
-  setWreckingBallActive: (active: boolean) => void;
-  resetGame: () => void;
-  world: CANNON.World | null;
-  setWorld: (world: CANNON.World) => void;
-  shootCooldown: boolean;
-  setShootCooldown: (cooldown: boolean) => void;
-  gameMode: GameMode;
-  setGameMode: (mode: GameMode) => void;
-  buildMaterial: MaterialType;
-  setBuildMaterial: (material: MaterialType) => void;
-  buildTool: BuildTool;
-  setBuildTool: (tool: BuildTool) => void;
-  selectedBlockId: string | null;
-  setSelectedBlockId: (id: string | null) => void;
-  undoStack: BuildAction[];
-  redoStack: BuildAction[];
-  pushUndoAction: (action: BuildAction) => void;
-  undo: () => void;
-  redo: () => void;
-  clearBuildState: () => void;
-}
-
-const generateId = () => Math.random().toString(36).substr(2, 9);
-
-export const materialProperties: Record<MaterialType, { color: string; health: number; density: number; emissive?: string }> = {
-  wood: { color: '#8B4513', health: 50, density: 600, emissive: '#2a1505' },
-  glass: { color: '#88ccff', health: 20, density: 2500, emissive: '#3366aa' },
-  concrete: { color: '#808080', health: 150, density: 2400, emissive: '#333333' },
-};
-
-export const useGameStore = create<GameState>((set, get) => ({
-  weapon: 'wreckingBall',
-  setWeapon: (weapon) => set({ weapon }),
-  blocks: new Map(),
-  addBlock: (block) => {
-    const blocks = new Map(get().blocks);
-    blocks.set(block.id, block);
-    set({ blocks });
-  },
-  addBlocks: (newBlocks) => {
-    const blocks = new Map(get().blocks);
-    newBlocks.forEach((block) => {
-      blocks.set(block.id, block);
+  useEffect(() => {
+    if (!linesRef.current) return;
+    const group = linesRef.current;
+    const material = new THREE.LineBasicMaterial({
+      color: '#4a5568',
+      transparent: true,
+      opacity: 0.3,
     });
-    set({ blocks });
-  },
-  removeBlock: (id) => {
-    const blocks = new Map(get().blocks);
-    blocks.delete(id);
-    set({ blocks });
-  },
-  damageBlock: (id, damage) => {
-    const blocks = new Map(get().blocks);
-    const block = blocks.get(id);
-    if (block) {
-      block.health -= damage;
-      if (block.health <= 0) {
-        blocks.delete(id);
-        set({ blocks });
-        return true;
-      }
-      set({ blocks });
-    }
-    return false;
-  },
-  updateBlockPosition: (id, position) => {
-    const blocks = new Map(get().blocks);
-    const block = blocks.get(id);
-    if (block) {
-      block.position = position;
-      set({ blocks });
-    }
-  },
-  updateBlockRotation: (id, rotation) => {
-    const blocks = new Map(get().blocks);
-    const block = blocks.get(id);
-    if (block) {
-      block.rotation = rotation;
-      set({ blocks });
-    }
-  },
-  particles: new Map(),
-  addParticle: (particle) => {
-    const particles = new Map(get().particles);
-    particles.set(particle.id, particle);
-    set({ particles });
-  },
-  removeParticle: (id) => {
-    const particles = new Map(get().particles);
-    particles.delete(id);
-    set({ particles });
-  },
-  updateParticle: (id, data) => {
-    const particles = new Map(get().particles);
-    const particle = particles.get(id);
-    if (particle) {
-      Object.assign(particle, data);
-      set({ particles });
-    }
-  },
-  explosions: new Map(),
-  addExplosion: (explosion) => {
-    const explosions = new Map(get().explosions);
-    explosions.set(explosion.id, explosion);
-    set({ explosions });
-  },
-  removeExplosion: (id) => {
-    const explosions = new Map(get().explosions);
-    explosions.delete(id);
-    set({ explosions });
-  },
-  updateExplosion: (id, data) => {
-    const explosions = new Map(get().explosions);
-    const explosion = explosions.get(id);
-    if (explosion) {
-      Object.assign(explosion, data);
-      set({ explosions });
-    }
-  },
-  wreckingBallActive: false,
-  setWreckingBallActive: (active) => set({ wreckingBallActive: active }),
-  resetGame: () => set({
-    blocks: new Map(),
-    particles: new Map(),
-    explosions: new Map(),
-    wreckingBallActive: false,
-  }),
-  world: null,
-  setWorld: (world) => set({ world }),
-  shootCooldown: false,
-  setShootCooldown: (cooldown) => set({ shootCooldown: cooldown }),
-  gameMode: 'destroy',
-  setGameMode: (mode) => set({ gameMode: mode, selectedBlockId: null, undoStack: [], redoStack: [] }),
-  buildMaterial: 'wood',
-  setBuildMaterial: (material) => set({ buildMaterial: material }),
-  buildTool: 'place',
-  setBuildTool: (tool) => set({ buildTool: tool, selectedBlockId: tool !== 'move' && tool !== 'rotate' ? null : get().selectedBlockId }),
-  selectedBlockId: null,
-  setSelectedBlockId: (id) => set({ selectedBlockId: id }),
-  undoStack: [],
-  redoStack: [],
-  pushUndoAction: (action) => {
-    const undoStack = [...get().undoStack, action];
-    set({ undoStack, redoStack: [] });
-  },
-  undo: () => {
-    const { undoStack, redoStack } = get();
-    if (undoStack.length === 0) return;
-    const action = undoStack[undoStack.length - 1];
-    const newUndoStack = undoStack.slice(0, -1);
-    const newRedoStack = [...redoStack, action];
 
-    const blocks = new Map(get().blocks);
+    for (let i = -GRID_HALF; i <= GRID_HALF; i += GRID_SIZE) {
+      const points1 = [new THREE.Vector3(i, 0.01, -GRID_HALF), new THREE.Vector3(i, 0.01, GRID_HALF)];
+      const geo1 = new THREE.BufferGeometry().setFromPoints(points1);
+      group.add(new THREE.Line(geo1, material));
 
-    switch (action.type) {
-      case 'add': {
-        blocks.delete(action.block.id);
-        break;
-      }
-      case 'remove': {
-        blocks.set(action.block.id, action.block);
-        break;
-      }
-      case 'move': {
-        const block = blocks.get(action.blockId);
-        if (block) {
-          block.position = action.fromPosition;
+      const points2 = [new THREE.Vector3(-GRID_HALF, 0.01, i), new THREE.Vector3(GRID_HALF, 0.01, i)];
+      const geo2 = new THREE.BufferGeometry().setFromPoints(points2);
+      group.add(new THREE.Line(geo2, material));
+    }
+
+    return () => {
+      while (group.children.length > 0) {
+        const child = group.children[0];
+        if (child instanceof THREE.Line) {
+          child.geometry.dispose();
         }
-        break;
+        group.remove(child);
       }
-      case 'rotate': {
-        const block = blocks.get(action.blockId);
-        if (block) {
-          block.rotation = action.fromRotation;
-        }
-        break;
-      }
+    };
+  }, []);
+
+  return <group ref={linesRef} />;
+}
+
+function GhostBlock() {
+  const buildMaterial = useGameStore((s) => s.buildMaterial);
+  const buildTool = useGameStore((s) => s.buildTool);
+  const [ghostPos, setGhostPos] = useState<[number, number, number] | null>(null);
+  const [ghostRotation, setGhostRotation] = useState<[number, number, number]>([0, 0, 0]);
+  const { camera, raycaster, pointer } = useThree();
+  const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
+  const intersectionPoint = useRef(new THREE.Vector3());
+  const lastPointer = useRef({ x: 0, y: 0 });
+
+  useFrame(() => {
+    if (buildTool !== 'place') {
+      setGhostPos(null);
+      return;
     }
 
-    set({ blocks, undoStack: newUndoStack, redoStack: newRedoStack, selectedBlockId: null });
-  },
-  redo: () => {
-    const { undoStack, redoStack } = get();
-    if (redoStack.length === 0) return;
-    const action = redoStack[redoStack.length - 1];
-    const newRedoStack = redoStack.slice(0, -1);
-    const newUndoStack = [...undoStack, action];
+    if (Math.abs(pointer.x - lastPointer.current.x) < 0.001 && Math.abs(pointer.y - lastPointer.current.y) < 0.001) {
+      return;
+    }
+    lastPointer.current = { x: pointer.x, y: pointer.y };
 
-    const blocks = new Map(get().blocks);
+    raycaster.setFromCamera(pointer, camera);
+    const ray = raycaster.ray;
 
-    switch (action.type) {
-      case 'add': {
-        blocks.set(action.block.id, action.block);
-        break;
-      }
-      case 'remove': {
-        blocks.delete(action.block.id);
-        break;
-      }
-      case 'move': {
-        const block = blocks.get(action.blockId);
-        if (block) {
-          block.position = action.toPosition;
-        }
-        break;
-      }
-      case 'rotate': {
-        const block = blocks.get(action.blockId);
-        if (block) {
-          block.rotation = action.toRotation;
-        }
-        break;
+    if (ray.intersectPlane(groundPlane.current, intersectionPoint.current)) {
+      const snappedX = Math.round(intersectionPoint.current.x / GRID_SIZE) * GRID_SIZE;
+      const snappedZ = Math.round(intersectionPoint.current.z / GRID_SIZE) * GRID_SIZE;
+      const snappedY = findStackHeight(snappedX, snappedZ);
+      setGhostPos([snappedX, snappedY, snappedZ]);
+      setGhostRotation([0, 0, 0]);
+    }
+  });
+
+  const properties = materialProperties[buildMaterial];
+  const isGlass = buildMaterial === 'glass';
+
+  if (!ghostPos) return null;
+
+  return (
+    <mesh position={ghostPos} rotation={ghostRotation}>
+      <boxGeometry args={[GRID_SIZE * 0.95, BLOCK_HEIGHT * 0.95, GRID_SIZE * 0.95]} />
+      <meshStandardMaterial
+        color={properties.color}
+        transparent
+        opacity={isGlass ? 0.3 : 0.4}
+        roughness={0.5}
+        depthWrite={false}
+      />
+      <lineSegments>
+        <edgesGeometry args={[new THREE.BoxGeometry(GRID_SIZE * 0.95, BLOCK_HEIGHT * 0.95, GRID_SIZE * 0.95)]} />
+        <lineBasicMaterial color="#ffffff" transparent opacity={0.6} />
+      </lineSegments>
+    </mesh>
+  );
+}
+
+function findStackHeight(x: number, z: number, excludeId?: string): number {
+  const blocks = useGameStore.getState().blocks;
+  const halfBlockHeight = (BLOCK_HEIGHT * 0.95) / 2;
+  let maxTop = 0;
+
+  blocks.forEach((block, id) => {
+    if (excludeId && id === excludeId) return;
+    const [bx, by, bz] = block.position;
+    const halfW = block.size[0] / 2;
+    const halfH = block.size[1] / 2;
+    const halfD = block.size[2] / 2;
+
+    if (Math.abs(bx - x) < halfW + 0.01 && Math.abs(bz - z) < halfD + 0.01) {
+      const blockTop = by + halfH;
+      if (blockTop > maxTop) {
+        maxTop = blockTop;
       }
     }
+  });
 
-    set({ blocks, undoStack: newUndoStack, redoStack: newRedoStack, selectedBlockId: null });
-  },
-  clearBuildState: () => set({
-    blocks: new Map(),
-    undoStack: [],
-    redoStack: [],
-    selectedBlockId: null,
-  }),
-}));
+  return maxTop + halfBlockHeight;
+}
 
-export { generateId };
+function BuildBlock({ block, isSelected }: { block: BlockData; isSelected: boolean }) {
+  const meshRef = useRef<THREE.Mesh>(null);
+  const outlineRef = useRef<THREE.LineSegments>(null);
+  const buildTool = useGameStore((s) => s.buildTool);
+  const buildMaterial = useGameStore((s) => s.buildMaterial);
+  const setSelectedBlockId = useGameStore((s) => s.setSelectedBlockId);
+  const addBlock = useGameStore((s) => s.addBlock);
+  const pushUndoAction = useGameStore((s) => s.pushUndoAction);
+  const properties = materialProperties[block.material];
+  const isGlass = block.material === 'glass';
+  const rotation = block.rotation || [0, 0, 0];
+  const isDragMoving = useRef(false);
+  const dragStart = useRef<[number, number, number] | null>(null);
+  const movePlaneRef = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), -block.position[1]));
+  const { camera, raycaster, pointer } = useThree();
+  const intersectionPoint = useRef(new THREE.Vector3());
+  const updateBlockPosition = useGameStore((s) => s.updateBlockPosition);
+
+  const placeOnTop = useCallback(() => {
+    const [bx, by, bz] = block.position;
+    const halfH = block.size[1] / 2;
+    const newY = by + halfH + (BLOCK_HEIGHT * 0.95) / 2;
+    const props = materialProperties[buildMaterial];
+    const newBlock: BlockData = {
+      id: generateId(),
+      position: [bx, newY, bz],
+      size: [GRID_SIZE * 0.95, BLOCK_HEIGHT * 0.95, GRID_SIZE * 0.95],
+      material: buildMaterial,
+      health: props.health,
+      maxHealth: props.health,
+      rotation: [0, 0, 0],
+    };
+    addBlock(newBlock);
+    pushUndoAction({ type: 'add', block: { ...newBlock } });
+  }, [block.position, block.size, buildMaterial, addBlock, pushUndoAction]);
+
+  const handleClick = useCallback((e: ThreeEvent<MouseEvent>) => {
+    e.stopPropagation();
+    if (buildTool === 'place') {
+      placeOnTop();
+      return;
+    }
+    if (buildTool === 'delete') {
+      const blocks = useGameStore.getState().blocks;
+      const blockData = blocks.get(block.id);
+      if (blockData) {
+        useGameStore.getState().removeBlock(block.id);
+        pushUndoAction({ type: 'remove', block: { ...blockData } });
+      }
+      return;
+    }
+    if (buildTool === 'move' || buildTool === 'rotate') {
+      setSelectedBlockId(isSelected ? null : block.id);
+      return;
+    }
+    setSelectedBlockId(block.id);
+  }, [block.id, buildTool, isSelected, setSelectedBlockId, pushUndoAction, placeOnTop]);
+
+  const handlePointerDown = useCallback((e: ThreeEvent<PointerEvent>) => {
+    if (buildTool !== 'move' || !isSelected) return;
+    e.stopPropagation();
+    isDragMoving.current = true;
+    dragStart.current = [...block.position] as [number, number, number];
+    movePlaneRef.current.set(new THREE.Vector3(0, 1, 0), -block.position[1]);
+  }, [buildTool, isSelected, block.position]);
+
+  const handlePointerUp = useCallback(() => {
+    if (!isDragMoving.current || !dragStart.current) return;
+    isDragMoving.current = false;
+    const fromPos = dragStart.current;
+    const toPos = [...block.position] as [number, number, number];
+    if (fromPos[0] !== toPos[0] || fromPos[1] !== toPos[1] || fromPos[2] !== toPos[2]) {
+      pushUndoAction({
+        type: 'move',
+        blockId: block.id,
+        fromPosition: fromPos,
+        toPosition: toPos,
+      });
+    }
+    dragStart.current = null;
+  }, [block.id, block.position, pushUndoAction]);
+
+  useFrame(() => {
+    if (isDragMoving.current && buildTool === 'move' && isSelected) {
+      raycaster.setFromCamera(pointer, camera);
+      const ray = raycaster.ray;
+      if (ray.intersectPlane(movePlaneRef.current, intersectionPoint.current)) {
+        const snappedX = Math.round(intersectionPoint.current.x / GRID_SIZE) * GRID_SIZE;
+        const snappedZ = Math.round(intersectionPoint.current.z / GRID_SIZE) * GRID_SIZE;
+        const newY = findStackHeight(snappedX, snappedZ, block.id);
+        if (snappedX !== block.position[0] || Math.abs(newY - block.position[1]) > 0.001 || snappedZ !== block.position[2]) {
+          updateBlockPosition(block.id, [snappedX, newY, snappedZ]);
+          movePlaneRef.current.set(new THREE.Vector3(0, 1, 0), -newY);
+        }
+      }
+    }
+  });
+
+  useEffect(() => {
+    const handleGlobalPointerUp = () => {
+      if (isDragMoving.current) {
+        handlePointerUp();
+      }
+    };
+    window.addEventListener('pointerup', handleGlobalPointerUp);
+    return () => window.removeEventListener('pointerup', handleGlobalPointerUp);
+  }, [handlePointerUp]);
+
+  return (
+    <group>
+      <mesh
+        ref={meshRef}
+        position={block.position}
+        rotation={rotation}
+        castShadow
+        receiveShadow
+        onClick={handleClick}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+      >
+        <boxGeometry args={block.size} />
+        <meshStandardMaterial
+          color={properties.color}
+          transparent={isGlass}
+          opacity={isGlass ? 0.6 : 1}
+          roughness={block.material === 'wood' ? 0.8 : block.material === 'concrete' ? 0.9 : 0.1}
+          metalness={block.material === 'concrete' ? 0.1 : block.material === 'glass' ? 0.9 : 0.05}
+          emissive={properties.color}
+          emissiveIntensity={isSelected ? 0.3 : 0}
+        />
+      </mesh>
+      {isSelected && (
+        <lineSegments
+          ref={outlineRef}
+          position={block.position}
+          rotation={rotation}
+        >
+          <edgesGeometry args={[new THREE.BoxGeometry(block.size[0] * 1.02, block.size[1] * 1.02, block.size[2] * 1.02)]} />
+          <lineBasicMaterial color="#00ff88" linewidth={2} />
+        </lineSegments>
+      )}
+    </group>
+  );
+}
+
+function PlacementHandler() {
+  const buildTool = useGameStore((s) => s.buildTool);
+  const buildMaterial = useGameStore((s) => s.buildMaterial);
+  const addBlock = useGameStore((s) => s.addBlock);
+  const pushUndoAction = useGameStore((s) => s.pushUndoAction);
+  const { camera, raycaster, pointer } = useThree();
+  const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
+  const intersectionPoint = useRef(new THREE.Vector3());
+
+  const handleGroundClick = useCallback((e: ThreeEvent<MouseEvent>) => {
+    if (buildTool !== 'place') return;
+    e.stopPropagation();
+
+    raycaster.setFromCamera(pointer, camera);
+    const ray = raycaster.ray;
+    if (ray.intersectPlane(groundPlane.current, intersectionPoint.current)) {
+      const snappedX = Math.round(intersectionPoint.current.x / GRID_SIZE) * GRID_SIZE;
+      const snappedZ = Math.round(intersectionPoint.current.z / GRID_SIZE) * GRID_SIZE;
+      const snappedY = findStackHeight(snappedX, snappedZ);
+
+      const properties = materialProperties[buildMaterial];
+      const block: BlockData = {
+        id: generateId(),
+        position: [snappedX, snappedY, snappedZ],
+        size: [GRID_SIZE * 0.95, BLOCK_HEIGHT * 0.95, GRID_SIZE * 0.95],
+        material: buildMaterial,
+        health: properties.health,
+        maxHealth: properties.health,
+        rotation: [0, 0, 0],
+      };
+
+      addBlock(block);
+      pushUndoAction({ type: 'add', block: { ...block } });
+    }
+  }, [buildTool, buildMaterial, addBlock, pushUndoAction, camera, raycaster, pointer]);
+
+  return (
+    <mesh
+      rotation={[-Math.PI / 2, 0, 0]}
+      position={[0, 0.01, 0]}
+      onClick={handleGroundClick}
+    >
+      <planeGeometry args={[GRID_HALF * 2, GRID_HALF * 2]} />
+      <meshBasicMaterial transparent opacity={0} side={THREE.DoubleSide} depthWrite={false} />
+    </mesh>
+  );
+}
+
+function KeyboardHandler() {
+  const selectedBlockId = useGameStore((s) => s.selectedBlockId);
+  const blocks = useGameStore((s) => s.blocks);
+  const updateBlockRotation = useGameStore((s) => s.updateBlockRotation);
+  const pushUndoAction = useGameStore((s) => s.pushUndoAction);
+  const undo = useGameStore((s) => s.undo);
+  const redo = useGameStore((s) => s.redo);
+  const setSelectedBlockId = useGameStore((s) => s.setSelectedBlockId);
+  const removeBlock = useGameStore((s) => s.removeBlock);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if ((e.key === 'y' && (e.ctrlKey || e.metaKey)) || (e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+
+      if (!selectedBlockId) return;
+      const block = blocks.get(selectedBlockId);
+      if (!block) return;
+
+      if (e.key === 'r' || e.key === 'R') {
+        const currentRot = block.rotation || [0, 0, 0];
+        const newRot: [number, number, number] = [currentRot[0], currentRot[1] + ROTATION_STEP, currentRot[2]];
+        const fromRotation = [...currentRot] as [number, number, number];
+        updateBlockRotation(selectedBlockId, newRot);
+        pushUndoAction({ type: 'rotate', blockId: selectedBlockId, fromRotation, toRotation: newRot });
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const blockData = blocks.get(selectedBlockId);
+        if (blockData) {
+          removeBlock(selectedBlockId);
+          pushUndoAction({ type: 'remove', block: { ...blockData } });
+          setSelectedBlockId(null);
+        }
+      }
+
+      if (e.key === 'Escape') {
+        setSelectedBlockId(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedBlockId, blocks, updateBlockRotation, pushUndoAction, undo, redo, removeBlock, setSelectedBlockId]);
+
+  return null;
+}
+
+function BuildGround() {
+  return (
+    <>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} receiveShadow>
+        <planeGeometry args={[GRID_HALF * 2, GRID_HALF * 2]} />
+        <meshStandardMaterial color="#2a3a2a" roughness={0.9} metalness={0.1} />
+      </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
+        <circleGeometry args={[GRID_HALF * 0.8, 64]} />
+        <meshStandardMaterial color="#3a4a3a" roughness={0.8} metalness={0.1} />
+      </mesh>
+    </>
+  );
+}
+
+export function BuildMode() {
+  const blocks = useGameStore((s) => s.blocks);
+  const selectedBlockId = useGameStore((s) => s.selectedBlockId);
+  const buildTool = useGameStore((s) => s.buildTool);
+
+  const blockArray = Array.from(blocks.values());
+
+  return (
+    <>
+      <BuildGround />
+      <BuildGrid />
+      <GhostBlock />
+      <PlacementHandler />
+      <KeyboardHandler />
+
+      {blockArray.map((block) => (
+        <BuildBlock
+          key={block.id}
+          block={block}
+          isSelected={block.id === selectedBlockId}
+        />
+      ))}
+
+      {selectedBlockId && buildTool === 'rotate' && (
+        <RotateGizmo blockId={selectedBlockId} />
+      )}
+    </>
+  );
+}
+
+function RotateGizmo({ blockId }: { blockId: string }) {
+  const blocks = useGameStore((s) => s.blocks);
+  const updateBlockRotation = useGameStore((s) => s.updateBlockRotation);
+  const pushUndoAction = useGameStore((s) => s.pushUndoAction);
+  const block = blocks.get(blockId);
+  const [hovered, setHovered] = useState<string | null>(null);
+
+  if (!block) return null;
+
+  const position = block.position;
+  const currentRot = block.rotation || [0, 0, 0];
+
+  const arrows = [
+    { axis: 'y+', color: '#00ff88', rotation: [0, 0, -Math.PI / 2] as [number, number, number], offset: [0, 0, 1.2] as [number, number, number] },
+    { axis: 'y-', color: '#ff8800', rotation: [0, 0, Math.PI / 2] as [number, number, number], offset: [0, 0, -1.2] as [number, number, number] },
+    { axis: 'x+', color: '#0088ff', rotation: [0, Math.PI / 2, 0] as [number, number, number], offset: [1.2, 0, 0] as [number, number, number] },
+    { axis: 'x-', color: '#ff0088', rotation: [0, -Math.PI / 2, 0] as [number, number, number], offset: [-1.2, 0, 0] as [number, number, number] },
+  ];
+
+  const handleRotate = (axis: string) => {
+    const fromRotation = [...currentRot] as [number, number, number];
+    const newRot: [number, number, number] = [...currentRot] as [number, number, number];
+
+    if (axis === 'y+' || axis === 'y-') {
+      newRot[1] += axis === 'y+' ? ROTATION_STEP : -ROTATION_STEP;
+    } else if (axis === 'x+' || axis === 'x-') {
+      newRot[0] += axis === 'x+' ? ROTATION_STEP : -ROTATION_STEP;
+    }
+
+    updateBlockRotation(blockId, newRot);
+    pushUndoAction({ type: 'rotate', blockId, fromRotation, toRotation: newRot });
+  };
+
+  return (
+    <group position={position}>
+      {arrows.map((arrow) => (
+        <group
+          key={arrow.axis}
+          position={arrow.offset}
+          rotation={arrow.rotation}
+          onClick={(e) => {
+            e.stopPropagation();
+            handleRotate(arrow.axis);
+          }}
+          onPointerOver={(e) => {
+            e.stopPropagation();
+            setHovered(arrow.axis);
+          }}
+          onPointerOut={() => setHovered(null)}
+        >
+          <mesh>
+            <coneGeometry args={[0.2, 0.5, 8]} />
+            <meshStandardMaterial
+              color={hovered === arrow.axis ? '#ffffff' : arrow.color}
+              emissive={arrow.color}
+              emissiveIntensity={hovered === arrow.axis ? 1 : 0.3}
+            />
+          </mesh>
+          <mesh position={[0, -0.4, 0]}>
+            <cylinderGeometry args={[0.06, 0.06, 0.8, 8]} />
+            <meshStandardMaterial
+              color={arrow.color}
+              emissive={arrow.color}
+              emissiveIntensity={0.2}
+            />
+          </mesh>
+        </group>
+      ))}
+    </group>
+  );
+}
+
+export default BuildMode;
